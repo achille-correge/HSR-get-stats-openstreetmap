@@ -35,7 +35,9 @@ def geodesic_length_coords(coords):
         total += d
     return total
 
-def overpass_fetch_country_ways(iso, retries=10):
+overpass_server_idx = 0
+def overpass_fetch_country_ways(iso, out_json_path, tries=10):
+    global overpass_server_idx
 
     query = f"""
         [out:json][timeout:900];
@@ -47,23 +49,45 @@ def overpass_fetch_country_ways(iso, retries=10):
         out geom;
     """
 
-    try:
-        data = requests.get("https://overpass-api.de/api/interpreter", params={
-            "data": query
-        }).json()
-    except requests.RequestException as e:
-        if retries <= 0:
-            print(f"Error fetching Overpass data for {iso}: {e}; no retries left, giving up.")
-            raise
-        else:
-            print(f"Error fetching Overpass data for {iso}: {e}; trying again...({retries} retries left)")
-            data = overpass_fetch_country_ways(iso, retries=retries-1)
-    # save the json in out-jsons/iso.json for debugging non-empty elements
-    if data.get("elements"):
-        print("nb elements:", len(data.get("elements", [])))
-        with open(f"out-jsons/{iso}.json", "w", encoding="utf-8") as f:
-            json.dump(data, f)
-    return data
+    overpass_servers = [
+        "https://overpass-api.de/api/interpreter",
+        "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+        "https://overpass.private.coffee/api/interpreter"
+    ]
+
+    for i in range(tries):
+        url = overpass_servers[overpass_server_idx%len(overpass_servers)]
+        try:
+            response = requests.post(
+                url,
+                data={"data": query},
+                headers={
+                        "User-Agent": "HSR-get-stats-openstreetmap/1.0 (https://github.com/achille-correge/HSR-get-stats-openstreetmap)"
+                    },
+                    timeout=900
+                )
+            if response.status_code != 200:
+                print("URL:", response.url)
+                print("HTTP:", response.status_code)
+                print("Content-Type:", response.headers.get("Content-Type"))
+                print(response.text[:2000])
+                response.raise_for_status()
+            data = response.json()
+            # save the json in out-jsons/iso.json for debugging non-empty elements
+            if data.get("elements"):
+                print("nb elements:", len(data.get("elements", [])))
+                with open(f"{out_json_path}/{iso}.json", "w", encoding="utf-8") as f:
+                    json.dump(data, f)
+            if overpass_server_idx >= 2: overpass_server_idx = 0 # The 2 first servers are the fastest, we prefer go back to them when we can
+            return data
+        except requests.RequestException as e:
+            overpass_server_idx = (overpass_server_idx+1)%3
+            if i == tries-1:
+                print(f"Error fetching Overpass data for {iso}: {e}; no retries left, giving up.")
+                raise
+            else:
+                print(f"Error fetching Overpass data for {iso}: {e}; trying again...({tries-i-1} retries left)")
+
 
 
 def fetch_country_list():
@@ -94,7 +118,7 @@ def fetch_data_from_iso(iso, out_json_path, skip_list):
             data = json.loads(f.read())
     else:
         print(f"Fetching railways in {iso} from Overpass (may be long)...")
-        data = overpass_fetch_country_ways(iso)
+        data = overpass_fetch_country_ways(iso, out_json_path)
     elements = data.get("elements", [])
     print(f"Total elements fetched: {len(elements)} (ways + nodes). Processing...")
     # if elements is empty, add to force_skip.txt
@@ -169,6 +193,8 @@ def main():
     
     out_csv_path = "out-csvs"
     out_json_path = "out-jsons"
+    os.makedirs(out_csv_path, exist_ok=True)
+    os.makedirs(out_json_path, exist_ok=True)
 
     country_list = fetch_country_list()
     # country_list = [{"iso": "GB", "name": "United Kingdom"}]  # for quick test
